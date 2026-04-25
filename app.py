@@ -32,12 +32,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 쿠키 매니저 초기화
-@st.cache_resource
-def get_cookie_manager():
-    return stx.CookieManager()
+# 쿠키 매니저 초기화 (캐시 사용 안 함 - 위젯이므로)
+if 'cookie_manager' not in st.session_state:
+    st.session_state.cookie_manager = stx.CookieManager()
 
-cookie_manager = get_cookie_manager()
+cookie_manager = st.session_state.cookie_manager
 
 # Databricks 연결
 @st.cache_resource
