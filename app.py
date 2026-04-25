@@ -5,8 +5,8 @@ from datetime import datetime, timedelta
 from databricks import sql
 import bcrypt
 import requests
-import extra_streamlit_components as stx
 import hashlib
+import base64
 
 # 페이지 설정
 st.set_page_config(page_title="AI 투자 비서", page_icon="💰", layout="wide")
@@ -32,12 +32,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 쿠키 매니저 초기화 (캐시 사용 안 함 - 위젯이므로)
-if 'cookie_manager' not in st.session_state:
-    st.session_state.cookie_manager = stx.CookieManager()
-
-cookie_manager = st.session_state.cookie_manager
-
 # Databricks 연결
 @st.cache_resource
 def get_databricks_connection():
@@ -59,58 +53,48 @@ def hash_password(password):
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
 def verify_password(password, hashed):
-    """비밀번호 검증"""
+    """비밀밀번호 검증"""
     return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
 
-# 세션 토큰 생성
-def create_session_token(username):
-    """사용자별 세션 토큰 생성 (쿠키 저장용)"""
-    secret_key = "ai_investment_advisor_secret_2026"
-    token_string = f"{username}:{secret_key}:{datetime.now().isoformat()}"
-    return hashlib.sha256(token_string.encode()).hexdigest()
+# 로그인 토큰 생성 (간단한 버전)
+def create_login_token(username):
+    """사용자명을 Base64로 인코딩 (간단 토큰)"""
+    # 실제 프로덕션에서는 JWT 등 사용 권장
+    token_str = f"{username}:{datetime.now().isoformat()}"
+    return base64.b64encode(token_str.encode()).decode()
 
-def verify_session_token(username, token):
-    """세션 토큰 검증"""
-    return token and len(token) == 64
-
-# 쿠키에 로그인 정보 저장
-def save_login_cookie(username):
-    """로그인 정보를 쿠키에 저장 (30일 유효)"""
-    token = create_session_token(username)
-    cookie_manager.set(
-        "auth_username", 
-        username, 
-        expires_at=datetime.now() + timedelta(days=30)
-    )
-    cookie_manager.set(
-        "auth_token", 
-        token, 
-        expires_at=datetime.now() + timedelta(days=30)
-    )
-
-# 쿠키에서 로그인 정보 불러오기
-def load_login_cookie():
-    """쿠키에서 로그인 정보 불러오기"""
+def decode_login_token(token):
+    """토큰에서 사용자명 추출"""
     try:
-        cookies = cookie_manager.get_all()
-        if cookies:
-            username = cookies.get("auth_username")
-            token = cookies.get("auth_token")
-            
-            if username and token and verify_session_token(username, token):
-                return username
+        decoded = base64.b64decode(token.encode()).decode()
+        username = decoded.split(':')[0]
+        return username
+    except:
+        return None
+
+# URL에 로그인 토큰 저장
+def save_login_to_url(username):
+    """로그인 토큰을 URL 쿼리 파라미터에 저장"""
+    token = create_login_token(username)
+    st.query_params["auth"] = token
+
+# URL에서 로그인 토큰 불러오기
+def load_login_from_url():
+    """자동 로그인: URL에서 토큰 확인"""
+    try:
+        auth_token = st.query_params.get("auth")
+        if auth_token:
+            username = decode_login_token(auth_token)
+            return username
     except:
         pass
     return None
 
-# 쿠키 삭제 (로그아웃)
-def clear_login_cookie():
-    """로그아웃 시 쿠키 삭제"""
-    try:
-        cookie_manager.delete("auth_username")
-        cookie_manager.delete("auth_token")
-    except:
-        pass
+# URL에서 로그인 토큰 삭제
+def clear_login_from_url():
+    """로그아웃 시 URL 파라미터 삭제"""
+    if "auth" in st.query_params:
+        del st.query_params["auth"]
 
 # 프로필 불러오기
 def load_user_profile(username):
@@ -319,9 +303,9 @@ if 'user_profile' not in st.session_state:
 if 'username' not in st.session_state:
     st.session_state.username = ""
 
-# 🍪 쿠키에서 자동 로그인 시도
+# 🔗 URL에서 자동 로그인 시도
 if not st.session_state.authenticated:
-    saved_username = load_login_cookie()
+    saved_username = load_login_from_url()
     if saved_username:
         profile = load_user_profile(saved_username)
         if profile:
@@ -345,7 +329,7 @@ if not st.session_state.authenticated:
         with col2:
             login_username = st.text_input("사용자 이름", key="login_username")
             login_password = st.text_input("비밀번호", type="password", key="login_password")
-            remember_me = st.checkbox("🍪 로그인 상태 유지 (30일)", value=True)
+            remember_me = st.checkbox("🔗 로그인 상태 유지 (브라우저 닫아도 유지)", value=True)
             
             if st.button("로그인", use_container_width=True):
                 if login_username and login_password:
@@ -355,9 +339,9 @@ if not st.session_state.authenticated:
                         st.session_state.user_profile = profile
                         st.session_state.username = login_username
                         
-                        # 로그인 상태 유지 체크 시 쿠키 저장
+                        # 로그인 상태 유지 체크 시 URL에 토큰 저장
                         if remember_me:
-                            save_login_cookie(login_username)
+                            save_login_to_url(login_username)
                         
                         st.success(f"✅ {message}")
                         st.rerun()
@@ -457,7 +441,7 @@ else:
             st.session_state.authenticated = False
             st.session_state.user_profile = {}
             st.session_state.username = ""
-            clear_login_cookie()
+            clear_login_from_url()
             st.rerun()
     
     # 탭 구성
@@ -516,8 +500,7 @@ else:
 # 푸터
 st.markdown("---")
 
-# 빌드 시간 표시
-from datetime import datetime
+# 배포 시간 표시
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S KST")
 
 st.markdown(f"""
