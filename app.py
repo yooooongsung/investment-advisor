@@ -3,17 +3,11 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime
 from databricks import sql
-import streamlit_authenticator as stauth
-import yaml
-from yaml.loader import SafeLoader
+import bcrypt
 import requests
 
 # 페이지 설정
-st.set_page_config(
-    page_title="AI 투자 비서",
-    page_icon="💰",
-    layout="wide"
-)
+st.set_page_config(page_title="AI 투자 비서", page_icon="💰", layout="wide")
 
 # CSS
 st.markdown("""
@@ -36,22 +30,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 인증 설정 (간단한 버전 - 실제로는 DB에 저장)
-credentials = {
-    'usernames': {
-        'demo': {
-            'name': '데모 사용자',
-            'password': st.secrets.get('DEMO_PASSWORD', 'demo123'),  # 실제로는 해시화
-            'age': 30,
-            'investment_style': '중립',
-            'investment_goal': '장기 자산 증식 (3년+)',
-            'budget': '1,000만원 ~ 5,000만원',
-            'experience': '1-3년'
-        }
-    }
-}
-
-# Databricks 연결 함수
+# Databricks 연결
 @st.cache_resource
 def get_databricks_connection():
     """Databricks SQL Warehouse에 연결"""
@@ -66,12 +45,88 @@ def get_databricks_connection():
         st.error(f"⚠️ Databricks 연결 실패: {e}")
         return None
 
-# Multi Agent 실행 함수
+# 비밀번호 해싱
+def hash_password(password):
+    """비밀번호를 bcrypt로 해싱"""
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def verify_password(password, hashed):
+    """비밀번호 검증"""
+    return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+
+# 회원가입
+def signup_user(username, password, name, age, investment_style, investment_goal, budget, experience):
+    """새 사용자 등록"""
+    conn = get_databricks_connection()
+    if conn is None:
+        return False, "Databricks 연결 실패"
+    
+    try:
+        cursor = conn.cursor()
+        
+        # 중복 확인
+        cursor.execute("SELECT username FROM default.users WHERE username = ?", (username,))
+        if cursor.fetchone():
+            return False, "이미 존재하는 사용자명입니다"
+        
+        # 비밀번호 해싱
+        password_hash = hash_password(password)
+        
+        # 사용자 등록
+        cursor.execute("""
+            INSERT INTO default.users 
+            (username, password_hash, name, age, investment_style, investment_goal, budget, experience, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, current_timestamp(), current_timestamp())
+        """, (username, password_hash, name, age, investment_style, investment_goal, budget, experience))
+        
+        cursor.close()
+        return True, "회원가입 성공!"
+    except Exception as e:
+        return False, f"회원가입 실패: {e}"
+
+# 로그인
+def login_user(username, password):
+    """사용자 로그인"""
+    conn = get_databricks_connection()
+    if conn is None:
+        return False, None, "Databricks 연결 실패"
+    
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT password_hash, name, age, investment_style, investment_goal, budget, experience
+            FROM default.users 
+            WHERE username = ?
+        """, (username,))
+        
+        result = cursor.fetchone()
+        cursor.close()
+        
+        if result is None:
+            return False, None, "사용자를 찾을 수 없습니다"
+        
+        password_hash, name, age, investment_style, investment_goal, budget, experience = result
+        
+        if verify_password(password, password_hash):
+            profile = {
+                'name': name,
+                'age': age,
+                'investment_style': investment_style,
+                'investment_goal': investment_goal,
+                'budget': budget,
+                'experience': experience
+            }
+            return True, profile, "로그인 성공!"
+        else:
+            return False, None, "비밀번호가 틀렸습니다"
+    except Exception as e:
+        return False, None, f"로그인 실패: {e}"
+
+# Multi Agent 실행
 def trigger_multi_agent():
     """Databricks Jobs API를 통해 Multi Agent 노트북 실행"""
     try:
-        job_id = 32251191378772  # Daily Multi Agent Analysis Job ID
-        
+        job_id = 32251191378772
         url = f"{st.secrets['DATABRICKS_HOST']}/api/2.1/jobs/run-now"
         headers = {
             "Authorization": f"Bearer {st.secrets['DATABRICKS_TOKEN']}",
@@ -86,12 +141,11 @@ def trigger_multi_agent():
             return True, f"Multi Agent 분석 시작! (Run ID: {run_id})"
         else:
             return False, f"실행 실패: {response.text}"
-            
     except Exception as e:
         return False, f"에러 발생: {str(e)}"
 
 # 시장 데이터 가져오기
-@st.cache_data(ttl=600)  # 10분 캐시
+@st.cache_data(ttl=600)
 def fetch_market_data():
     """Databricks에서 시장 데이터 가져오기"""
     conn = get_databricks_connection()
@@ -130,18 +184,17 @@ def fetch_market_data():
             asset_name = asset_mapping.get(row[0], row[0].upper())
             market_data[asset_name] = {
                 "price": float(row[1]),
-                "change": 0.0,  # 계산 필요
+                "change": 0.0,
                 "rsi": float(row[2]),
                 "signal": row[3]
             }
         
         return market_data if market_data else demo_data
-        
     except Exception as e:
         st.warning(f"데이터 로드 실패: {e}")
         return demo_data
 
-# AI 분석 리포트 가져오기
+# AI 분석 리포트
 @st.cache_data(ttl=600)
 def fetch_ai_report():
     """Databricks에서 최신 AI 분석 리포트 가져오기"""
@@ -165,7 +218,6 @@ def fetch_ai_report():
             return f"**{result[1]} AI 분석**\n\n{result[0]}"
         else:
             return "최신 AI 분석 리포트가 없습니다. Multi Agent 실행 버튼을 눌러주세요."
-            
     except Exception as e:
         return f"리포트 로드 실패: {e}"
 
@@ -174,12 +226,14 @@ if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 if 'user_profile' not in st.session_state:
     st.session_state.user_profile = {}
+if 'username' not in st.session_state:
+    st.session_state.username = ""
 
 # 헤더
 st.markdown('<div class="big-title">💰 AI 투자 비서</div>', unsafe_allow_html=True)
 st.markdown('<div class="subtitle">당신만의 맞춤형 투자 전략을 찾아드립니다</div>', unsafe_allow_html=True)
 
-# 로그인/회원가입 UI (간단한 버전)
+# 로그인/회원가입
 if not st.session_state.authenticated:
     st.markdown("---")
     
@@ -189,23 +243,80 @@ if not st.session_state.authenticated:
         st.subheader("로그인")
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            username = st.text_input("사용자 이름", key="login_username")
-            password = st.text_input("비밀번호", type="password", key="login_password")
+            login_username = st.text_input("사용자 이름", key="login_username")
+            login_password = st.text_input("비밀번호", type="password", key="login_password")
             
             if st.button("로그인", use_container_width=True):
-                # 간단한 인증 (실제로는 DB 조회)
-                if username == "demo" and password == "demo123":
-                    st.session_state.authenticated = True
-                    st.session_state.user_profile = credentials['usernames']['demo']
-                    st.success("✅ 로그인 성공!")
-                    st.rerun()
+                if login_username and login_password:
+                    success, profile, message = login_user(login_username, login_password)
+                    if success:
+                        st.session_state.authenticated = True
+                        st.session_state.user_profile = profile
+                        st.session_state.username = login_username
+                        st.success(f"✅ {message}")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {message}")
                 else:
-                    st.error("❌ 사용자 이름 또는 비밀번호가 틀렸습니다")
+                    st.warning("사용자 이름과 비밀번호를 입력하세요")
     
     with tab_signup:
         st.subheader("회원가입")
-        st.info("💡 데모 버전: 현재는 로그인 기능만 제공됩니다. (ID: demo, PW: demo123)")
         
+        signup_username = st.text_input("사용자 이름 (ID)", key="signup_username", help="로그인에 사용할 ID")
+        signup_password = st.text_input("비밀번호", type="password", key="signup_password")
+        signup_password2 = st.text_input("비밀번호 확인", type="password", key="signup_password2")
+        
+        st.markdown("---")
+        st.write("**📝 투자 프로필**")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            signup_name = st.text_input("이름", key="signup_name")
+            signup_age = st.number_input("나이", min_value=19, max_value=100, value=30, key="signup_age")
+            signup_style = st.select_slider(
+                "투자 성향",
+                options=["매우 보수적", "보수적", "중립", "공격적", "매우 공격적"],
+                value="중립",
+                key="signup_style"
+            )
+        
+        with col2:
+            signup_goal = st.selectbox(
+                "투자 목적",
+                ["단기 수익 (1년 이내)", "중기 성장 (1-3년)", "장기 자산 증식 (3년+)", "안정적 배당 수익", "은퇴 자금 마련"],
+                key="signup_goal"
+            )
+            signup_budget = st.selectbox(
+                "투자 가능 금액",
+                ["100만원 미만", "100만원 ~ 500만원", "500만원 ~ 1,000만원", "1,000만원 ~ 5,000만원", "5,000만원 이상"],
+                key="signup_budget"
+            )
+            signup_exp = st.selectbox(
+                "투자 경험",
+                ["없음 (처음)", "1년 미만", "1-3년", "3-5년", "5년 이상"],
+                key="signup_exp"
+            )
+        
+        st.markdown("---")
+        
+        if st.button("🚀 회원가입", type="primary", use_container_width=True):
+            if not signup_username or not signup_password:
+                st.error("❌ 사용자 이름과 비밀번호를 입력하세요")
+            elif signup_password != signup_password2:
+                st.error("❌ 비밀번호가 일치하지 않습니다")
+            elif len(signup_password) < 4:
+                st.error("❌ 비밀번호는 최소 4자 이상이어야 합니다")
+            else:
+                success, message = signup_user(
+                    signup_username, signup_password, signup_name, signup_age,
+                    signup_style, signup_goal, signup_budget, signup_exp
+                )
+                if success:
+                    st.success(f"✅ {message} 로그인 탭에서 로그인하세요!")
+                else:
+                    st.error(f"❌ {message}")
+
 else:
     # 로그인 후 화면
     profile = st.session_state.user_profile
@@ -213,6 +324,7 @@ else:
     # 사이드바
     with st.sidebar:
         st.header(f"👤 {profile['name']}님")
+        st.caption(f"@{st.session_state.username}")
         st.write(f"**나이:** {profile['age']}세")
         st.write(f"**투자 성향:** {profile['investment_style']}")
         st.write(f"**투자 목적:** {profile['investment_goal']}")
@@ -221,7 +333,7 @@ else:
         
         st.markdown("---")
         
-        # Multi Agent 실행 버튼 추가! ⭐
+        # Multi Agent 실행 버튼
         st.subheader("🤖 AI 분석 실행")
         if st.button("🚀 Multi Agent 실행", use_container_width=True, type="primary"):
             with st.spinner("Multi Agent 분석 실행 중..."):
@@ -229,7 +341,6 @@ else:
                 if success:
                     st.success(message)
                     st.info("💡 3-5분 후 새로고침하면 최신 분석을 볼 수 있습니다")
-                    # 캐시 초기화
                     fetch_ai_report.clear()
                 else:
                     st.error(message)
@@ -239,6 +350,7 @@ else:
         if st.button("🚪 로그아웃"):
             st.session_state.authenticated = False
             st.session_state.user_profile = {}
+            st.session_state.username = ""
             st.rerun()
     
     # 탭 구성
@@ -267,23 +379,22 @@ else:
         ai_report = fetch_ai_report()
         st.success(ai_report)
         
-        # 새로고침 버튼
         if st.button("🔄 최신 데이터 새로고침"):
             fetch_market_data.clear()
             fetch_ai_report.clear()
             st.rerun()
     
-    # TAB 2 & 3: 기존 코드 유지 (간략화)
+    # TAB 2: 맞춤 분석
     with tab2:
         st.header(f"🎯 {profile['name']}님을 위한 맞춤 분석")
         st.info("사용자 프로필 기반 맞춤 분석을 제공합니다")
         
-        # 파이 차트 예시
         allocation = {"국내 주식": 35, "해외 주식": 25, "채권": 20, "현금": 20}
         fig = go.Figure(data=[go.Pie(labels=list(allocation.keys()), values=list(allocation.values()))])
         fig.update_layout(height=300)
         st.plotly_chart(fig, use_container_width=True)
     
+    # TAB 3: 추천 전략
     with tab3:
         st.header("📈 구체적 행동 전략")
         st.info("투자 성향에 맞는 추천 전략을 제공합니다")
