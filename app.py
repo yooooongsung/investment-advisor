@@ -516,9 +516,15 @@ else:
 
 # 푸터
 st.markdown("---")
-st.markdown("""
+
+# 빌드 시간 표시
+from datetime import datetime
+BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S KST")
+
+st.markdown(f"""
 <div style="text-align: center; color: #888; padding: 1rem;">
     <p>💡 본 서비스는 투자 참고용이며, 투자 판단의 책임은 본인에게 있습니다.</p>
     <p>🤖 Powered by Databricks AI & Multi-Agent System</p>
+    <p style="font-size: 0.8rem; color: #aaa;">마지막 배포: {BUILD_TIME} | 새 버전이 안 보이면 <strong>Ctrl+F5</strong>를 눌러주세요</p>
 </div>
 """, unsafe_allow_html=True)
